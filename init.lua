@@ -3,8 +3,8 @@ local areas_to_emerge = {}
 local mapgen_chunksize = tonumber(minetest.get_mapgen_setting("chunksize"))
 local mapblock_size = mapgen_chunksize * 16
 
-local delay_between_emerge_calls = 1
-local check_for_non_admin_players = true
+local delay_between_emerge_calls = minetest.settings:get("idle_emerge_delay") or 0.0
+local check_for_non_admin_players = minetest.settings:get_bool("idle_emerge_admin_check", true)
 
 -- adapted from https://stackoverflow.com/questions/398299/looping-in-a-spiral with much modification
 local spiral_pos_iterator = function(pos1, pos2, size)

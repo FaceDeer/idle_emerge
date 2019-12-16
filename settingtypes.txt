@@ -1,0 +1,2 @@
+idle_emerge_delay (Delay between end of one emerge and start of next) float 0.0
+idle_emerge_admin_check (Suspend idle emerge process while non-admins are logged in) bool true

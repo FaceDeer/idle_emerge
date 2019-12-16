@@ -6,6 +6,6 @@ Furthermore, map blocks will be emerged in a spiral pattern starting from the ce
 
 ## Settings
 
-* emerge_delay: the number of seconds that Minetest will wait between finishing the previous emerge call and starting the next one. Note that setting this to 0 is fine, other map operations will still be able to interject themselves between emerge calls.
+* idle_emerge_delay: the number of seconds that Minetest will wait between finishing the previous emerge call and starting the next one. Note that setting this to 0 is fine, other map operations will still be able to interject themselves between emerge calls.
 
-* check_for_non_admin_players: The idle_emerge operation will be suspended if there are any players on the server who do *not* have the "server" privilege. The idea behind this is to allow idle_emerge to use system resources only when nobody else is online to be bothered by any lag it might introduce. "server" users are assumed to be admins who will understand and accept any reduction of their playing experience that might be caused by this.
+* idle_emerge_admin_check: The idle_emerge operation will be suspended if there are any players on the server who do *not* have the "server" privilege. The idea behind this is to allow idle_emerge to use system resources only when nobody else is online to be bothered by any lag it might introduce. "server" users are assumed to be admins who will understand and accept any reduction of their playing experience that might be caused by this.
