@@ -5,6 +5,9 @@ local mapblock_size = mapgen_chunksize * 16
 
 local delay_between_emerge_calls = tonumber(minetest.settings:get("idle_emerge_delay")) or 0.0
 local check_for_non_admin_players = minetest.settings:get_bool("idle_emerge_admin_check", true)
+local delete_time_multiplier = 10 -- In theory, the game will spend 1/delete_time_multiplier of its time running deletion
+local average_delete_dtime_over = 10 -- how many delete times to keep track of when calculating an average
+local update_user_timer = 30 -- if a user has a task running, send him an update every this many seconds
 
 -- adapted from https://stackoverflow.com/questions/398299/looping-in-a-spiral with much modification
 local spiral_pos_iterator = function(pos1, pos2, size, skip_to_index)
@@ -192,9 +195,44 @@ minetest.register_chatcommand("idle_emerge", {
 			return false, p2
 		end
 		local iterator = spiral_pos_iterator(p1, p2, mapblock_size)
-		table.insert(areas_to_emerge, {pos1 = p1, pos2 = p2, name = name, index = 0, iterator = iterator})
+		table.insert(areas_to_emerge, {task = "emerge", pos1 = p1, pos2 = p2, name = name, index = 0, iterator = iterator})
 		minetest.chat_send_player(name, "idle_emerge task queued for " .. minetest.pos_to_string(p1)
 			.. ", " .. minetest.pos_to_string(p2))
+	end,
+})
+
+minetest.register_chatcommand("idle_delete", {
+	params = "() | (here [<radius>]) | (<pos1> <pos2>) | (\"clear\" [<index>])",
+	description = "Slowly delete map blocks contained in area pos1 to pos2 "
+		.."(<pos1> and <pos2> must be in parentheses)",
+	privs = {server=true},
+	func = function(name, param)
+		local p1, p2 = parse_range_str(name, param)
+		if p1 == false then
+			return false, p2
+		end
+		local iterator = spiral_pos_iterator(p1, p2, mapblock_size)
+		table.insert(areas_to_emerge, {task = "delete", pos1 = p1, pos2 = p2, name = name, index = 0, iterator = iterator})
+		minetest.chat_send_player(name, "idle_delete task queued for " .. minetest.pos_to_string(p1)
+			.. ", " .. minetest.pos_to_string(p2))
+	end,
+})
+
+minetest.register_chatcommand("idle_show_queue", {
+	params = "none",
+	description = "Display the current idle task queue",
+	privs = {server=true},
+	func = function(name, param)
+		for i, task in ipairs(areas_to_emerge) do
+			local progress = "in progress"
+			if task.index == 0 then
+				progress = "waiting to start"
+			end			
+			minetest.chat_send_player(name,
+				i .. ": " .. task.task .. " from " .. minetest.pos_to_string(task.pos1) .. " to "
+				.. minetest.pos_to_string(task.pos2) .. " queued by " .. task.name .. " " .. progress
+			)
+		end
 	end,
 })
 
@@ -208,19 +246,51 @@ local emerge_delay = 0
 --    * `minetest.EMERGE_FROM_MEMORY`
 --    * `minetest.EMERGE_FROM_DISK`
 --    * `minetest.EMERGE_GENERATED`
-local emerge_callback = function(blockpos, action, calls_remaining, param)
+local emerge_callback
+emerge_callback = function(blockpos, action, calls_remaining, param)
+	if action == minetest.EMERGE_ERRORED then
+		param.error_count = (param.error_count or 0)
+		if param.error_count <= 3 then
+			param.error_count = param.error_count + 1
+			local area = vector.multiply(blockpos, 16)
+			minetest.debug("EMERGE_ERRORED for " .. minetest.pos_to_string(area) .. ", retrying " .. param.error_count)
+			minetest.emerge_area(area, area, emerge_callback, param)
+			return
+		end
+	end
 	emerging = false
 	emerge_delay = delay_between_emerge_calls
 	if param then
 		param.index = param.index + 1
+		param.error_count = 0
 --		minetest.chat_send_player(param.name, "emerged block " .. param.index .. "   "
 --			.. minetest.pos_to_string(vector.multiply(blockpos, 16)))
 		save_data()
 	end
 end
 
+local delete_called = false
+local last_ten_delete_dtimes = {}
+for i = 1,average_delete_dtime_over do
+	table.insert(last_ten_delete_dtimes, 0.1)
+end
+local delete_dtimes_index = 0
+local average_delete_dtime = function()
+	local sum = 0
+	for _, dtime in ipairs(last_ten_delete_dtimes) do
+		sum = sum + dtime
+	end
+	return sum/average_delete_dtime_over
+end
+
 minetest.register_globalstep(function(dtime)
 	local first_area = areas_to_emerge[1]
+	if delete_called then
+		last_ten_delete_dtimes[delete_dtimes_index + 1] = dtime
+		delete_dtimes_index = (delete_dtimes_index + 1) % average_delete_dtime_over
+		delete_called = false
+	end
+	
 	if not emerging and first_area then
 		if check_for_non_admin_players and non_admin_players_present then
 			return
@@ -231,10 +301,24 @@ minetest.register_globalstep(function(dtime)
 		end
 		local target_area = first_area.iterator()
 		if target_area then
-			emerging = true
-			minetest.emerge_area(target_area, target_area, emerge_callback, first_area)
+			local last_chat = first_area.last_chat or 0
+			local current_time = minetest.get_gametime()
+			if current_time - last_chat > update_user_timer then
+				first_area.last_chat = current_time
+				minetest.chat_send_player(first_area.name, "Idle " .. first_area.task .. " " .. minetest.pos_to_string(target_area))
+			end
+			if first_area.task == "emerge" then
+				emerging = true
+				minetest.emerge_area(target_area, target_area, emerge_callback, first_area)
+			elseif first_area.task == "delete" then
+				-- delete doesn't have a callback function, so we'll have to rely on a timed delay and trust that things are working okay.
+				emerge_delay = average_delete_dtime() * delete_time_multiplier + delay_between_emerge_calls
+				first_area.index = first_area.index + 1
+				delete_called = true
+				minetest.delete_area(target_area, target_area)
+			end
 		else
-			minetest.chat_send_player(first_area.name, "finished emerging " .. minetest.pos_to_string(first_area.pos1) .. " to " .. minetest.pos_to_string(first_area.pos2))
+			minetest.chat_send_player(first_area.name, "finished task " .. first_area.task .. " from " .. minetest.pos_to_string(first_area.pos1) .. " to " .. minetest.pos_to_string(first_area.pos2))
 			table.remove(areas_to_emerge, 1) -- FIFO
 			save_data()
 		end
