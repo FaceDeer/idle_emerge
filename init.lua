@@ -184,6 +184,15 @@ local function parse_range_str(player_name, str)
 	return p1, p2
 end
 
+local get_max_index = function(p1, p2)
+	local test_iterator = spiral_pos_iterator(p1, p2, mapblock_size)
+	local i = 0
+	while test_iterator() do
+		i = i + 1
+	end
+	return i
+end
+
 minetest.register_chatcommand("idle_emerge", {
 	params = "() | (here [<radius>]) | (<pos1> <pos2>) | (\"clear\" [<index>])",
 	description = "Slowly load (or, if nonexistent, generate) map blocks "
@@ -195,7 +204,15 @@ minetest.register_chatcommand("idle_emerge", {
 			return false, p2
 		end
 		local iterator = spiral_pos_iterator(p1, p2, mapblock_size)
-		table.insert(areas_to_emerge, {task = "emerge", pos1 = p1, pos2 = p2, name = name, index = 0, iterator = iterator})
+		table.insert(areas_to_emerge, {
+			task = "emerge",
+			pos1 = p1,
+			pos2 = p2,
+			name = name,
+			index = 0,
+			max_index = get_max_index(p1, p2),
+			iterator = iterator
+		})
 		minetest.chat_send_player(name, "idle_emerge task queued for " .. minetest.pos_to_string(p1)
 			.. ", " .. minetest.pos_to_string(p2))
 	end,
@@ -212,7 +229,15 @@ minetest.register_chatcommand("idle_delete", {
 			return false, p2
 		end
 		local iterator = spiral_pos_iterator(p1, p2, mapblock_size)
-		table.insert(areas_to_emerge, {task = "delete", pos1 = p1, pos2 = p2, name = name, index = 0, iterator = iterator})
+		table.insert(areas_to_emerge, {
+			task = "delete",
+			pos1 = p1,
+			pos2 = p2,
+			name = name,
+			index = 0,
+			max_index = get_max_index(p1, p2),
+			iterator = iterator
+		})
 		minetest.chat_send_player(name, "idle_delete task queued for " .. minetest.pos_to_string(p1)
 			.. ", " .. minetest.pos_to_string(p2))
 	end,
@@ -223,15 +248,21 @@ minetest.register_chatcommand("idle_show_queue", {
 	description = "Display the current idle task queue",
 	privs = {server=true},
 	func = function(name, param)
-		for i, task in ipairs(areas_to_emerge) do
-			local progress = "in progress"
-			if task.index == 0 then
-				progress = "waiting to start"
-			end			
-			minetest.chat_send_player(name,
-				i .. ": " .. task.task .. " from " .. minetest.pos_to_string(task.pos1) .. " to "
-				.. minetest.pos_to_string(task.pos2) .. " queued by " .. task.name .. " " .. progress
-			)
+		if #areas_to_emerge == 0 then
+			minetest.chat_send_player(name, "No tasks queued")
+		else
+			for i, task in ipairs(areas_to_emerge) do
+				local progress
+				if task.index == 0 then
+					progress = "waiting to start"
+				else
+					progress = math.floor((task.index/task.max_index) * 100) .. "% done"
+				end
+				minetest.chat_send_player(name,
+					i .. ": " .. task.task .. " from " .. minetest.pos_to_string(task.pos1) .. " to "
+					.. minetest.pos_to_string(task.pos2) .. " queued by " .. task.name .. " " .. progress
+				)
+			end
 		end
 	end,
 })
@@ -305,7 +336,9 @@ minetest.register_globalstep(function(dtime)
 			local current_time = minetest.get_gametime()
 			if current_time - last_chat > update_user_timer then
 				first_area.last_chat = current_time
-				minetest.chat_send_player(first_area.name, "Idle " .. first_area.task .. " " .. minetest.pos_to_string(target_area))
+				local progress =  first_area.index .. "/" .. first_area.max_index .. " ("
+					.. math.floor((first_area.index/first_area.max_index) * 100) .. "% done)"
+				minetest.chat_send_player(first_area.name, "Idle " .. first_area.task .. " " .. progress)
 			end
 			if first_area.task == "emerge" then
 				emerging = true
@@ -316,6 +349,7 @@ minetest.register_globalstep(function(dtime)
 				first_area.index = first_area.index + 1
 				delete_called = true
 				minetest.delete_area(target_area, target_area)
+				save_data()
 			end
 		else
 			minetest.chat_send_player(first_area.name, "finished task " .. first_area.task .. " from " .. minetest.pos_to_string(first_area.pos1) .. " to " .. minetest.pos_to_string(first_area.pos2))
