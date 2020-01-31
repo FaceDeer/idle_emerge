@@ -10,7 +10,8 @@ local average_delete_dtime_over = 10 -- how many delete times to keep track of w
 local update_user_timer = 30 -- if a user has a task running, send him an update every this many seconds
 
 -- adapted from https://stackoverflow.com/questions/398299/looping-in-a-spiral with much modification
-local spiral_pos_iterator = function(pos1, pos2, size, skip_to_index)
+local spiral_pos_iterator_vertial = function(pos1, pos2, size, skip_to_index)
+	-- This iterator does the whole y range (from min up to max) at each step in the spiral
 	local minp = vector.divide({x = math.min(pos1.x, pos2.x), y = math.min(pos1.y, pos2.y), z = math.min(pos1.z, pos2.z)}, size)
 	local maxp = vector.divide({x = math.max(pos1.x, pos2.x), y = math.max(pos1.y, pos2.y), z = math.max(pos1.z, pos2.z)}, size)
 	local width = maxp.x-minp.x
@@ -63,6 +64,69 @@ local spiral_pos_iterator = function(pos1, pos2, size, skip_to_index)
 	return iterator
 end
 
+local spiral_pos_iterator_horizontal = function(pos1, pos2, size, skip_to_index)
+	-- this iterator completes each y layer starting at the top and moving down
+	local minp = vector.divide({x = math.min(pos1.x, pos2.x), y = math.min(pos1.y, pos2.y), z = math.min(pos1.z, pos2.z)}, size)
+	local maxp = vector.divide({x = math.max(pos1.x, pos2.x), y = math.max(pos1.y, pos2.y), z = math.max(pos1.z, pos2.z)}, size)
+	local width = maxp.x-minp.x
+	local depth = maxp.z-minp.z
+	local min_y = math.ceil(minp.y)
+	local max_y = math.floor(maxp.y)
+
+    local x = 0
+	local y = max_y
+	local z = 0
+    local dx = 0
+    local dz = -1
+	local width_half = width/2
+	local depth_half = depth/2
+	local i = 0
+	local max_iter = math.max(width, depth)^2
+	
+	local iterator = function()
+		local ret = nil
+		while ret == nil do
+			if i > max_iter then
+				ret = false
+			else
+				if x == z or (x < 0 and x == -z) or (x > 0 and x == 1-z) then
+					dx, dz = -dz, dx
+				end
+				x, z = x+dx, z+dz
+				i = i + 1
+				if (-width_half < x) and (x <= width_half) and (-depth_half < z) and (z <= depth_half) then
+					ret = true
+				end
+			end
+		end
+		
+		if ret == false then
+			-- we finished a y-layer. decrement y, and if we're still in range reset the spiral to the middle.
+			y = y - 1
+			if y < min_y then
+				return nil
+			end
+			x = 0
+			z = 0
+			dx = 0
+			dz = -1
+			i = 0
+		end
+--		minetest.chat_send_all(x .. " " .. y .. " " .. z)
+		return {x=(x+width_half+minp.x)*size, y=y*size, z=(z+depth_half+minp.z)*size}
+	end
+	
+	if skip_to_index and skip_to_index > 0 then
+		-- Probably not the most efficient thing in the world to just plough through the iterator's outputs
+		-- to catch up to the desired index, but unlikely to come up often and unlikely to have bugs.
+		for i = 1, skip_to_index do
+			iterator()
+		end
+	end
+	
+	return iterator
+end
+
 -- Loading and saving data
 local filename = minetest.get_worldpath() .. "/idle_emerge_queue.lua"
 
@@ -71,7 +135,7 @@ local load_data = function()
 	if f then
 		areas_to_emerge = f()
 		for _, area in ipairs(areas_to_emerge) do
-			area.iterator = spiral_pos_iterator(area.pos1, area.pos2, mapblock_size, area.index)
+			area.iterator = spiral_pos_iterator_horizontal(area.pos1, area.pos2, mapblock_size, area.index)
 		end
 	end
 end
@@ -185,7 +249,7 @@ local function parse_range_str(player_name, str)
 end
 
 local get_max_index = function(p1, p2)
-	local test_iterator = spiral_pos_iterator(p1, p2, mapblock_size)
+	local test_iterator = spiral_pos_iterator_horizontal(p1, p2, mapblock_size)
 	local i = 0
 	while test_iterator() do
 		i = i + 1
@@ -203,7 +267,7 @@ minetest.register_chatcommand("idle_emerge", {
 		if p1 == false then
 			return false, p2
 		end
-		local iterator = spiral_pos_iterator(p1, p2, mapblock_size)
+		local iterator = spiral_pos_iterator_horizontal(p1, p2, mapblock_size)
 		table.insert(areas_to_emerge, {
 			task = "emerge",
 			pos1 = p1,
@@ -228,7 +292,7 @@ minetest.register_chatcommand("idle_delete", {
 		if p1 == false then
 			return false, p2
 		end
-		local iterator = spiral_pos_iterator(p1, p2, mapblock_size)
+		local iterator = spiral_pos_iterator_horizontal(p1, p2, mapblock_size)
 		table.insert(areas_to_emerge, {
 			task = "delete",
 			pos1 = p1,
@@ -256,7 +320,7 @@ minetest.register_chatcommand("idle_show_queue", {
 				if task.index == 0 then
 					progress = "waiting to start"
 				else
-					progress = math.floor((task.index/task.max_index) * 100) .. "% done"
+					progress = math.floor((task.index/task.max_index) * 1000)/10 .. "% done"
 				end
 				minetest.chat_send_player(name,
 					i .. ": " .. task.task .. " from " .. minetest.pos_to_string(task.pos1) .. " to "
@@ -300,7 +364,6 @@ emerge_callback = function(blockpos, action, calls_remaining, param)
 	end
 end
 
-local delete_called = false
 local last_ten_delete_dtimes = {}
 for i = 1,average_delete_dtime_over do
 	table.insert(last_ten_delete_dtimes, 0.1)
@@ -316,11 +379,6 @@ end
 
 minetest.register_globalstep(function(dtime)
 	local first_area = areas_to_emerge[1]
-	if delete_called then
-		last_ten_delete_dtimes[delete_dtimes_index + 1] = dtime
-		delete_dtimes_index = (delete_dtimes_index + 1) % average_delete_dtime_over
-		delete_called = false
-	end
 	
 	if not emerging and first_area then
 		if check_for_non_admin_players and non_admin_players_present then
@@ -337,7 +395,7 @@ minetest.register_globalstep(function(dtime)
 			if current_time - last_chat > update_user_timer then
 				first_area.last_chat = current_time
 				local progress =  first_area.index .. "/" .. first_area.max_index .. " ("
-					.. math.floor((first_area.index/first_area.max_index) * 100) .. "% done)"
+					.. math.floor((first_area.index/first_area.max_index) * 1000)/10 .. "% done)"
 				minetest.chat_send_player(first_area.name, "Idle " .. first_area.task .. " " .. progress)
 			end
 			if first_area.task == "emerge" then
@@ -347,8 +405,11 @@ minetest.register_globalstep(function(dtime)
 				-- delete doesn't have a callback function, so we'll have to rely on a timed delay and trust that things are working okay.
 				emerge_delay = average_delete_dtime() * delete_time_multiplier + delay_between_emerge_calls
 				first_area.index = first_area.index + 1
-				delete_called = true
+				local t_start = os.clock()
 				minetest.delete_area(target_area, target_area)
+				local t_end = os.clock()
+				last_ten_delete_dtimes[delete_dtimes_index + 1] = t_end - t_start
+				delete_dtimes_index = (delete_dtimes_index + 1) % average_delete_dtime_over
 				save_data()
 			end
 		else
